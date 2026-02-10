@@ -149,7 +149,7 @@ namespace FEA_Beam_Solver
             // Material
             var material = UniformIsotropicMaterial.CreateFromYoungPoisson(2.3e9, 0.33);
 
-            // FRAME SECTION (geometric) — pick something reasonable, adjust to your units
+            // FRAME SECTION (geometric) 
             // Example: 30mm x 30mm rectangle in local YZ
             var section = MakeRectSection(b: 0.03, h: 0.03, jOverride: -1);
 
@@ -190,7 +190,7 @@ namespace FEA_Beam_Solver
                 {
                     Label = $"e{i}",
 
-                    // Frame behavior (bending + torsion). Do NOT include Truss unless you specifically want axial-only too.
+                    // Frame behavior (bending + torsion).
                     Behavior = BarElementBehaviour.BeamYEulerBernoulli
                              | BarElementBehaviour.BeamZEulerBernoulli
                              | BarElementBehaviour.Shaft,
