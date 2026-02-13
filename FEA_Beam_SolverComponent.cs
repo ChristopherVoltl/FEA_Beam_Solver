@@ -146,15 +146,11 @@ namespace FEA_Beam_Solver
         {
             var model = new Model();
 
-            // Material
-            var material = UniformIsotropicMaterial.CreateFromYoungPoisson(2.3e9, 0.33);
-
-            // FRAME SECTION (geometric) 
-            // Example: 30mm x 30mm rectangle in local YZ
-            var section = MakeRectSection(b: 0.03, h: 0.03, jOverride: -1);
+            var material = UniformIsotropicMaterial.CreateFromYoungPoisson(2.3e3, 0.33); // N/mm^2
+            var section = MakeRectSection(b: 30.0, h: 30.0, jOverride: -1);            // mm
 
             // Node welding
-            double tol = 0.1;// adjust to Rhino units
+            double tol = 0.5;// adjust to Rhino units
             var nodeByKey = new Dictionary<(long, long, long), Node>();
 
             (long, long, long) KeyFromPoint(Point3d p)
@@ -191,9 +187,7 @@ namespace FEA_Beam_Solver
                     Label = $"e{i}",
 
                     // Frame behavior (bending + torsion).
-                    Behavior = BarElementBehaviour.BeamYEulerBernoulli
-                             | BarElementBehaviour.BeamZEulerBernoulli
-                             | BarElementBehaviour.Shaft,
+                    Behavior = BarElementBehaviours.FullFrame,
 
                     Section = section,
                     Material = material,
@@ -205,7 +199,29 @@ namespace FEA_Beam_Solver
                 model.Elements.Add(e);
             }
 
+            //find duplicates 
+            var seen = new HashSet<((long, long, long), (long, long, long))>();
+            var filtered = new List<BarElement>();
+
+            foreach (BarElement e in model.Elements)
+            {
+                var k0 = KeyFromPoint(new Point3d(e.StartNode.Location.X, e.StartNode.Location.Y, e.StartNode.Location.Z));
+                var k1 = KeyFromPoint(new Point3d(e.EndNode.Location.X, e.EndNode.Location.Y, e.EndNode.Location.Z));
+
+                // undirected edge key
+                var edge = (k0.CompareTo(k1) <= 0) ? (k0, k1) : (k1, k0);
+
+                if (seen.Add(edge))
+                    filtered.Add(e);
+            }
+
+            model.Elements.Clear();
+            foreach (var e in filtered)
+                model.Elements.Add(e);
+
             // Validate zero-length
+            double minLen = 0.1; // mm
+
             foreach (BarElement e in model.Elements)
             {
                 var a = e.StartNode.Location;
@@ -213,27 +229,42 @@ namespace FEA_Beam_Solver
 
                 double dx = a.X - b.X, dy = a.Y - b.Y, dz = a.Z - b.Z;
                 double L = Math.Sqrt(dx * dx + dy * dy + dz * dz);
-                if (L < 1e-9)
-                    throw new Exception($"Zero-length element: {e.Label}");
+
+                if (L < minLen)
+                    throw new Exception($"Too-short element (<{minLen}mm): {e.Label}  L={L}");
             }
 
             // Default free
             foreach (var n in model.Nodes)
                 n.Constraints = Constraints.Released;
 
+            // Collect supports in a list so we can pick an anchor
+            var supportList = new List<Node>();
+            var supportSet = new HashSet<Node>();
 
-            var supportNodes = new HashSet<Node>();
             foreach (var sp in supports)
             {
                 var key = KeyFromPoint(sp);
                 if (!nodeByKey.TryGetValue(key, out var sn))
                     throw new Exception($"No model node found near support point {sp} using tol={tol}");
 
-                sn.Constraints = Constraints.MovementFixed; 
-                                                        
-
-                supportNodes.Add(sn);
+                // avoid duplicates
+                if (supportSet.Add(sn))
+                    supportList.Add(sn);
             }
+
+            if (supportList.Count == 0)
+                throw new Exception("No support nodes found (after welding).");
+
+            // Anchor ONE support node as fully fixed (removes rigid-body spin modes)
+            supportList[0].Constraints = Constraints.Fixed;
+
+            // All other supports are pinned: translations fixed, rotations released
+            for (int i = 1; i < supportList.Count; i++)
+                supportList[i].Constraints = Constraints.MovementFixed;
+
+            // If you still use your BFS check, use this supported set:
+            var supportNodes = new HashSet<Node>(supportList);
 
             // Loads
             foreach (var lp in loads)
@@ -244,6 +275,15 @@ namespace FEA_Beam_Solver
 
                 ln.Loads.Add(new NodalLoad(new Force(0, 0, -2, 0, 0, 0)));
             }
+
+            //Prove supports are matching nodes
+            int matched = 0;
+            foreach (var sp in supports)
+            {
+                if (nodeByKey.ContainsKey(KeyFromPoint(sp))) matched++;
+            }
+            System.Diagnostics.Debug.WriteLine($"Support points: {supports.Count}, matched nodes: {matched}");
+
 
             // Ensure each connected component has at least one support
             EnsureEveryComponentHasSupport(model, supportNodes);
@@ -375,15 +415,7 @@ namespace FEA_Beam_Solver
         static double ComputeWebRotationDegrees(BfePoint a, BfePoint b)
         {
             // Goal: stable orientation for local Y/Z.
-            // We choose a reference "up" axis in global coords and compute rotation about the bar axis
-            // that aligns the element's local Y as consistently as possible.
-            //
-            // BriefFiniteElement.Net already defines a default local system, and WebRotation rotates about the bar axis.
-            // We'll do a pragmatic rule:
-            // - if bar is near-vertical, rotate 90 deg so faces don't flip unpredictably
-            // - else keep 0
-            //
-            // This avoids nasty inconsistencies in large lattices. You can later improve by matching to a Rhino plane.
+
 
             var v = new Vector3d(b.X - a.X, b.Y - a.Y, b.Z - a.Z);
             if (!v.Unitize()) return 0.0;
@@ -396,8 +428,9 @@ namespace FEA_Beam_Solver
             return 0.0;
         }
 
-        static void EnsureEveryComponentHasSupport(Model model, HashSet<Node> supported)
+        static void EnsureEveryComponentHasSupport(Model model, HashSet<Node> supportNodes)
         {
+            // adjacency
             var adj = new Dictionary<Node, List<Node>>();
             foreach (var n in model.Nodes) adj[n] = new List<Node>();
 
@@ -419,22 +452,22 @@ namespace FEA_Beam_Solver
                 q.Enqueue(start);
                 visited.Add(start);
 
-                bool hasSupport = supported.Contains(start);
+                bool hasSupport = supportNodes.Contains(start);
+                int count = 0;
 
                 while (q.Count > 0)
                 {
                     var u = q.Dequeue();
-                    if (supported.Contains(u)) hasSupport = true;
+                    count++;
+
+                    if (supportNodes.Contains(u)) hasSupport = true;
 
                     foreach (var v in adj[u])
-                    {
-                        if (visited.Add(v))
-                            q.Enqueue(v);
-                    }
+                        if (visited.Add(v)) q.Enqueue(v);
                 }
 
                 if (!hasSupport)
-                    throw new Exception($"Component #{compId} has NO supports → singular.");
+                    throw new Exception($"Component #{compId} (size {count}) has NO supports → singular.");
             }
         }
 
