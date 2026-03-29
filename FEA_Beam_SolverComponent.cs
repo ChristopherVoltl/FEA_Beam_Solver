@@ -112,7 +112,7 @@ namespace FEA_Beam_Solver
 
             (string result,
              List<Curve> curves,
-             List<double> values,
+             List<double> values, 
              List<TextDot> dots,
              List<Curve> dispVectors,
              List<double> nodeDispMag,
@@ -503,7 +503,15 @@ namespace FEA_Beam_Solver
         /// You can add image files to your project resources and access them like this:
         /// return Resources.IconForThisComponent;
         /// </summary>
-        protected override System.Drawing.Bitmap Icon => null;
+        protected override System.Drawing.Bitmap Icon
+        {
+            get
+            {
+                // You can access your image from the Resources folder/file
+                // The exact syntax depends on your project's structure and resource file name.
+                return Icons.Resource1.FEAIconImage_48;
+            }
+        }
 
         /// <summary>
         /// Each component must have a unique Guid to identify it. 
